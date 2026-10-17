@@ -1,198 +1,258 @@
 # AgentMatrix
 
-基于 Issue 看板的 Agent 工作台：以任务卡片承载目标，以 Agent Session 持续推进工作，通过可组合的执行与迭代策略完成交付。
+An Issue-based workspace for agents running on your own computers and servers.
 
-> 当前状态：基于 Plane 的项目管理基础，处于 Agent 能力的规划阶段。本文中的 Agent 功能、模型、接口和里程碑均为拟定方案，尚未实现。
+Connect a machine with the AgentMatrix daemon, choose a local workspace and agent, and run work from an Issue card. AgentMatrix keeps the conversation visible and persistent while the connected machine owns execution.
+
+> **Status:** architecture and initial build roadmap. The repository currently provides the Plane-based project-management foundation. Machine pairing, the daemon, Pi integration, conversation synchronization, and the two-container environment described below are planned.
 >
-> 原版 Plane README 已完整保存在 [README.plane.md](./README.plane.md)，可查看上游介绍、安装方式与社区信息。
+> The original Plane README is preserved unchanged in [README.plane.md](./README.plane.md).
 
-## 项目目标
+## Product direction
 
-让用户在看板上组织、启动、观察和干预 Agent 的工作，把需求、执行过程和结果保留在同一张 Issue 卡片中。
+Each Issue is a task with a persistent agent conversation. Users describe the goal, select a connected machine and local workspace, send instructions, inspect tool activity and results, and continue the same conversation until the work passes review.
 
-期望的基础体验：
+The platform focuses on organizing and observing work. Agent processes, repositories, tools, native sessions, and model credentials stay on connected machines.
 
-1. 创建 Issue，填写目标、背景资料和验收条件。
-2. 在卡片中启动 Agent Session，由 Agent 获取上下文并执行任务。
-3. 查看对话、工具调用、执行状态和产物，按需补充指令。
-4. 对结果进行验收；需要修改时，在原有上下文中继续执行。
-5. 后续通过子任务、依赖关系和策略模板，组合多个 Agent 的工作。
+Local execution refers to where the agent and tools run. An agent may still call a cloud model using credentials configured on that machine.
 
-首个版本优先服务于单个用户手动发起和验收任务的场景，再逐步扩展团队协作与自动编排。看板中的 Issue 指本系统的工作项，接入 GitHub Issues 属于后续集成能力。
+## What already exists
 
-## 当前已有的基础
+The project builds on Plane:
 
-| 能力 | 现有实现 | 后续用途 |
-| --- | --- | --- |
-| 工作空间与项目 | Workspace、Project、成员和角色权限 | 组织任务，限定数据访问范围 |
-| Issue 管理 | 描述、状态、优先级、负责人、标签、日期、附件等 | 承载任务目标、输入与验收结果 |
-| 多种视图 | 看板、列表、表格、日历、甘特图 | 观察执行、筛选任务与安排交付 |
-| 看板交互 | 拖动排序、分组、泳道、快速创建与编辑 | 扩展为 Agent 调度和监控入口 |
-| 任务关系 | 父子任务、阻塞关系、关联关系 | 表达任务拆解和执行依赖 |
-| 任务组织 | Cycles、Modules、自定义 Views | 管理阶段目标、功能模块和关注范围 |
-| 文档与协作 | Pages、富文本编辑、实时协同、评论、活动记录 | 保存背景资料、人机讨论与交付文档 |
-| 对外连接 | REST API、Webhook、投递日志 | 连接执行器与外部系统 |
-| 后台服务 | Celery worker、定时任务、数据库、消息队列、对象存储 | 支撑调度、持久化和文件产物 |
+| Existing foundation                                       | Role in AgentMatrix                           |
+| --------------------------------------------------------- | --------------------------------------------- |
+| Workspaces, projects, members, and permissions            | Organize tasks and control access             |
+| Issues, descriptions, labels, priorities, and attachments | Define goals, inputs, and acceptance criteria |
+| Kanban, list, spreadsheet, calendar, and Gantt views      | Organize and monitor work                     |
+| Parent/child Issues and dependency relationships          | Foundation for later task composition         |
+| Cycles, Modules, and saved Views                          | Group delivery goals and operational views    |
+| Pages, rich-text editing, comments, and activity history  | Background material and collaboration         |
+| REST APIs, webhooks, and persistent storage               | Integration and synchronization foundations   |
 
-现有 AI Assistant 提供单次文本生成；现有 Session 是用户登录会话。Agent 会话、工具执行、运行恢复和多 Agent 编排需要新增。Cycles 表示项目迭代周期，不能直接承担 Agent 的重试或评审循环。
+The existing AI Assistant is a single text-generation integration. Existing Session records represent user login sessions. Neither implements the local-agent workflow in this document.
 
-## 核心概念
+## Architecture
 
-界面上保持「一张 Issue 卡片，一个主 Agent Session」的体验，底层区分任务、会话与执行，便于支持重试、继续工作和未来的多 Agent 组合。
-
-| 概念 | 职责 | 初期关系 |
-| --- | --- | --- |
-| Issue | 定义目标、背景、优先级、依赖与验收条件 | 一张任务卡片 |
-| Agent Session | 保存围绕任务的持续对话、上下文与执行配置 | 每个 Issue 按需建立一个主会话 |
-| Run | 表示一次实际执行，记录状态、输入快照、事件与结果 | 一个 Session 可以有多次 Run |
-| Agent Profile | 描述执行后端、模型、角色指令和允许使用的工具 | 初期使用一套默认配置 |
-| Artifact | 保存执行产物，如文档、文件、补丁、提交或链接 | 关联产生它的 Run |
-| Strategy | 规定执行步骤、角色交接、循环和停止条件 | 首版采用手动发起、人工验收 |
-
-首次启动时创建主会话；后续用户补充指令，在同一会话内发起新的 Run。初期同一会话只允许一个活动 Run。未来再扩展会话分叉、候选方案和专门负责评审的会话。
-
-任务状态与运行状态分别维护：Issue 可以仍处于「进行中」，对应 Run 已经成功或失败。Run 成功仅表示本次执行完成，Issue 是否完成取决于验收。首次启动可按规则将未开始的 Issue 推进为进行中；失败或取消保留任务阶段，由用户决定后续操作。
-
-拟定的首版 Run 状态为 `queued → running → succeeded / failed / cancelled`。后续引入等待用户、等待授权等状态；暂停和原地恢复仅在执行后端明确支持时开放。
-
-## 实现思路
-
-保留现有项目管理与协作体系，在 Django API 内增加 Agent 业务模块，通过独立执行进程承载实际工作。
+AgentMatrix is the control and visibility layer. A small daemon installed on each connected machine supervises local agents and synchronizes their activity.
 
 ```mermaid
 flowchart LR
-    UI[Issue 看板与会话面板] --> API[Django Agent API]
-    API --> DB[(会话 / Run / 事件 / 产物)]
-    API --> Q[Celery 调度任务]
-    Q --> AD[执行后端适配器]
-    AD --> RT[隔离的 Agent 执行环境]
-    RT --> TOOL[模型与工具]
-    RT -->|执行事件与产物| API
-    DB -->|经 API 增量读取| UI
+    Browser[Issue board and conversation UI]
+    API[AgentMatrix API]
+    DB[(Commands, conversations and events)]
+
+    subgraph Machine["Connected computer or server"]
+        Daemon[AgentMatrix daemon]
+        Agent[Pi first, other agents later]
+        Files[Local repository and tools]
+        State[(Native sessions and sync journal)]
+    end
+
+    Browser -->|Instructions and controls| API
+    API --> DB
+    Daemon -->|Outbound command polling| API
+    Daemon -->|Event and result uploads| API
+    API -->|Incremental conversation reads| Browser
+    Daemon --> Agent
+    Agent --> Files
+    Agent --> State
+    Daemon --> State
 ```
 
-- **业务层**负责权限、会话、执行请求、状态和验收，沿用 Workspace / Project 的访问边界。
-- **调度层**负责投递、领取任务、取消请求、超时和异常收敛；长时间运行的 Agent 由执行环境承载。
-- **执行适配器**提供启动执行、请求取消、查询状态和接收事件的统一接口；先接通一个真实后端，再增加其他后端。
-- **执行环境**管理工作目录、工具和凭证范围；涉及代码或命令时使用隔离工作区与容器，具体实现按首个后端确定。
-- **事件层**持久化消息、工具调用、状态变化和产物，使用 Run 内递增序号支持增量读取与断线补读。
-- **交互层**首版采用增量轮询，后续按需要加入 SSE 或 WebSocket。已有文档协同服务继续承担文档同步。
+### Platform responsibilities
 
-执行事件与产物由执行服务通过业务层校验后落库。执行配置需要保存快照和版本，避免修改默认配置后无法解释历史结果。敏感凭证只保留引用，不写入消息、事件和配置快照。
+- Manage Issues, permissions, machine registration, and workspace bindings.
+- Persist commands, user messages, normalized agent events, and selected artifacts.
+- Show machine availability, conversations, tool activity, execution history, and results.
+- Record human acceptance separately from execution success.
+- Coordinate task dependencies and strategies in later versions.
 
-## 基础实现计划
+### Daemon responsibilities
 
-以下按可独立验收的里程碑推进；所有 Agent 项均未完成，当前不承诺固定工期。首个执行后端在 M0 确定，后续任务据此细化。
+- Pair the machine, maintain its identity, and report availability and agent capabilities.
+- Resolve registered workspace IDs to locally approved paths.
+- Start, supervise, stop, and resume supported agent sessions.
+- Keep provider credentials and native agent state on the machine.
+- Journal commands and events locally, deduplicate deliveries, and synchronize after reconnecting.
+- Translate each agent's protocol into versioned AgentMatrix commands and events.
 
-### M0：明确首个任务与执行协议
+The platform does not need agent installations, repository clones, shell access to machines, or model API keys for this workflow. Existing Plane infrastructure retains its current responsibilities; the new dispatch path can use durable PostgreSQL commands without requiring Celery to host or invoke agents.
 
-- [ ] 选择一个贯穿开发的示例任务，明确输入、可用工具、产物和人工验收标准。
-- [ ] 确定首个执行后端及部署方式，验证它的工具调用、事件输出、取消和超时能力。
-- [ ] 明确 Issue、Session、Run、事件和 Artifact 的字段、权限与状态转换。
-- [ ] 约定启动、追加指令、取消、查询状态与读取增量事件的 API 契约。
+## Connecting a machine
 
-**验收：** 示例任务能够通过选定后端真实执行并产生可检查的产物，能力边界和数据协议有明确记录。
+1. Install and start the daemon on a computer or server.
+2. Open its short-lived pairing link or enter its pairing code in AgentMatrix.
+3. Sign in and confirm the machine and owning workspace.
+4. The daemon receives a revocable credential scoped to that machine.
+5. Register local workspace directories and enable supported agents locally.
+6. Select the machine, workspace, and agent when starting an Issue conversation.
 
-### M1：建立可持久化的会话与执行记录
+The first version permits only the machine owner to dispatch work. Team-shared machines require a later explicit access-grant model.
 
-- [ ] 新增 Agent Session、消息、Run、事件、产物的模型、迁移和 API。
-- [ ] 支持创建或获取 Issue 的主会话，保存用户指令与本次执行输入快照。
-- [ ] 实现启动请求去重、Run 状态转换，以及同一会话的活动 Run 互斥。
-- [ ] 支持按事件序号增量查询，校验所有读写的 Workspace / Project 权限。
+The daemon initiates outbound connections. Users do not expose an inbound daemon port or configure port forwarding. Machine credentials are separate from general user API tokens; the server checks machine ownership, workspace access, and assignment for every command and event.
 
-**验收：** 会话和执行记录可通过 API 创建、查询并在服务重启后保留；重复启动不会生成重复执行，越权访问被拒绝。
+Workspace registration defines where a task starts. It is not a filesystem sandbox. The daemon uses locally configured executable paths and workspace mappings; platform requests cannot supply arbitrary executables or unregistered paths. Agent tool restrictions must be enforced by the local runtime or operating-system isolation.
 
-### M2：接入真实 Agent 执行
+## First agent: Pi
 
-- [ ] 用 Celery 投递调度任务，接入 M0 选定的执行后端。
-- [ ] 将用户指令、Issue 输入和指定资料组织为本次执行上下文。
-- [ ] 持久化模型输出、工具事件、产物和最终执行结果。
-- [ ] 实现取消确认、执行超时、心跳或状态对账，收敛失联任务。
-- [ ] 处理重复队列投递和迟到事件，禁止取消或失败后的旧事件覆盖终态。
+Pi is the initial integration because it provides a structured RPC interface and persistent native sessions. The daemon runs a pinned, tested Pi version as a subprocess and exchanges JSONL commands and events over stdin/stdout.
 
-**验收：** 可以从 Issue 启动真实任务并查询结果；取消、超时和进程异常均有可解释状态，无效旧任务不会继续回写当前结果。
+The adapter will:
 
-### M3：打通看板内的人机工作闭环
+- Create and reopen persistent Pi sessions in the selected local workspace.
+- Send prompts and translate message, tool, usage, and lifecycle events.
+- Distinguish command acceptance from execution completion.
+- Inspect settled execution, errors, and abort results before assigning a final Run status.
+- Handle cancellation and queued follow-up work explicitly.
+- Declare supported capabilities so the UI only exposes available controls.
 
-- [ ] 在 Issue 详情和快速查看面板中增加会话入口。
-- [ ] 展示用户消息、Agent 输出、工具调用、执行状态、错误和产物。
-- [ ] 增加启动、追加指令和取消操作，在卡片上展示运行摘要。
-- [ ] 通过增量读取更新执行过程；刷新页面后恢复历史和当前状态。
-- [ ] 支持人工验收并完成 Issue；未通过时以新 Run 继续工作。
+Use persistent sessions, not Pi's ephemeral `--no-session` mode. Pi's native session state is authoritative for continuing model context; replaying the visible platform transcript is not equivalent to restoring that state.
 
-**验收：** 用户能完成「创建卡片 → 执行 → 查看产物 → 补充要求 → 再执行 → 验收」全过程。
+Pi runs with its launching process's permissions. The simulated machine container supplies an isolation boundary during development; real installations must document their local execution permissions.
 
-**M0–M3 构成首个 MVP。** 它只包含单一执行后端、每张卡片一个主会话、显式启动和人工验收；拖动卡片仍遵循任务管理语义。自动触发、多 Agent 编排和策略编辑器安排在后续阶段。
+Codex, Claude Code, and other agents will follow through separate adapters using their supported structured interfaces. Live attachment to an independently running terminal agent is outside the initial build.
 
-### M4：补齐连续工作与运行治理
+References: [Pi](https://github.com/earendil-works/pi), [RPC](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md), [sessions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sessions.md), and [events](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/json.md). Protocol behavior must be verified against the pinned implementation version.
 
-- [ ] 增加等待用户输入、工具授权和恢复执行的交互，区分继续会话与恢复底层进程。
-- [ ] 实现失败后的显式重试，保留历史 Run，明确工具副作用和幂等边界。
-- [ ] 增加并发限制、执行预算、耗时与可获取的模型用量记录。
-- [ ] 支持上下文摘要、资料版本引用和运行配置追踪。
+## Task, conversation, and execution model
 
-**验收：** 用户能理解并处理等待、失败和预算耗尽；重试不覆盖历史，系统不盲目重放有副作用的操作。
+| Entity           | Purpose                                                                       |
+| ---------------- | ----------------------------------------------------------------------------- |
+| Machine          | Registered device, owner, credential, capabilities, and last contact          |
+| MachineWorkspace | Machine-local workspace binding with an opaque platform ID                    |
+| AgentSession     | Issue conversation bound to a machine, workspace, adapter, and native session |
+| Run              | One execution attempt within that conversation                                |
+| MachineCommand   | Durable instruction to start, continue, or cancel assigned work               |
+| AgentEvent       | Ordered, deduplicated record of messages, tools, status, or artifacts         |
+| Artifact         | Selected output or file associated with a Run                                 |
 
-### M5：引入基础组合与迭代策略
+The initial experience is one primary AgentSession per Issue, with multiple Runs over time. Each session permits one active Run. Idle sessions can reopen their native state; continuing a session remains bound to its original machine and workspace.
 
-- [ ] 先提供固定模板，如「实施 → 评审 → 修正」，限制最大轮数并定义退出条件。
-- [ ] 基于 Issue 依赖实现串行调度，检查依赖环和前置任务验收结果。
-- [ ] 基于子 Issue 实现受控并行、失败处理和结果汇总。
-- [ ] 为策略实例保存版本、步骤状态、输入输出和人工干预记录。
+Issue state, Run state, and machine connectivity are separate. A successful Run does not automatically complete the Issue. Losing contact with a machine makes execution uncertain; it does not establish failure or authorize running the task elsewhere.
 
-**验收：** 一项多步骤任务可以按规则推进，失败时停止或进入明确分支，达到轮数或预算上限后停止并交还用户。
+## Persistence and synchronization
 
-## 预计涉及的代码位置
+Two complementary stores preserve the workflow:
 
-以下新增目录与文件为建议位置，实际开发时按已有代码约定细化。
+| On the connected machine                         | On the platform                                        |
+| ------------------------------------------------ | ------------------------------------------------------ |
+| Native agent session and context state           | Issue, Session, and Run metadata                       |
+| Local workspace and repository                   | User messages and completed assistant messages         |
+| Durable command receipts and execution ownership | Normalized tool and lifecycle events                   |
+| Event journal and synchronization cursor         | Searchable conversation history and selected artifacts |
 
-| 范围 | 位置 | 预计工作 |
-| --- | --- | --- |
-| Agent 数据 | `apps/api/plane/db/models/agent.py`（新增）、`apps/api/plane/db/migrations/` | 会话、消息、Run、事件和产物模型 |
-| Agent API | `apps/api/plane/app/views/agent/`、`apps/api/plane/app/serializers/agent.py`、`apps/api/plane/app/urls/agent.py`（新增） | 会话、执行控制与增量事件接口 |
-| 执行服务 | `apps/api/plane/agent/`、`apps/api/plane/bgtasks/agent_run_task.py`（新增） | 业务服务、适配器、执行调度与异常收敛 |
-| API 接线 | `apps/api/plane/db/models/__init__.py`、`apps/api/plane/app/urls/__init__.py` | 注册模型与路由 |
-| 共享类型与客户端 | `packages/types/src/agent/`、`packages/services/src/agent/`（新增） | 数据契约与 API 调用 |
-| 前端状态与面板 | `apps/web/store/agent/`、`apps/web/components/agent/`（新增） | 会话状态、执行记录、消息和产物展示 |
-| Issue 集成 | `apps/web/components/issues/issue-detail/`、`apps/web/components/issues/peek-overview/`、`apps/web/components/issues/issue-layouts/kanban/` | 会话入口与卡片运行摘要 |
-| 部署与验证 | `docker-compose*.yml`、`apps/api/plane/tests/` | 执行服务配置、接口与生命周期测试 |
+Provider credentials remain local. Conversation text and tool output explicitly synchronized by the daemon are stored on the platform and may include repository content. Artifact uploads are explicit; the repository is not automatically mirrored.
 
-通用组件继续复用现有 UI 包；首版避免改写 Issue 主模型和看板布局逻辑，用关联模型增加 Agent 能力。
+The first transport uses outbound HTTPS polling and batched event uploads. Browser updates use incremental API reads. WebSocket or SSE delivery can be added later without changing the durable command/event contract.
 
-## 未来方向
+Required behavior:
 
-| 方向 | 目标体验 | 前置基础 |
-| --- | --- | --- |
-| 多角色协作 | 规划、实施、测试、评审各自承担职责并交接结果 | 稳定会话、明确输入输出与角色权限 |
-| 策略模板 | 为不同任务选择不同的执行和验收流程 | 可追踪的步骤、条件、预算与停止规则 |
-| 任务依赖编排 | 前置任务验收后触发后续任务，并行处理独立子任务 | 依赖检查、并发控制与结果汇总 |
-| 多方案与会话分叉 | 从同一目标探索不同方案，比较后选择结果 | 上下文快照、独立工作区和产物比较 |
-| 多执行后端 | 按任务选择模型、Agent 框架或执行环境 | 统一适配器及后端能力声明 |
-| 开发交付集成 | 关联仓库、分支、worktree、补丁、PR 和 CI 结果 | 隔离执行、凭证范围与交付验收机制 |
-| 工具与知识扩展 | 按项目接入 MCP 工具、文档和外部业务数据 | 工具授权、检索与资料版本引用 |
-| 看板自动化 | 显式规则把卡片状态变化转换为调度动作 | 事件去重、触发来源识别和循环防护 |
-| 质量与成本评估 | 比较策略的成功率、返工率、耗时和成本 | 完整执行事件、验收记录与可比任务样本 |
+- Commands have stable IDs and a durable local execution record before launch.
+- Event batches have stable IDs and ordered sequence numbers; retries cannot duplicate visible messages.
+- The server acknowledges events after committing them. The daemon retains unacknowledged events for replay.
+- Streaming text is coalesced for upload; completed messages provide authoritative transcript content.
+- Disconnects buffer events locally. Reconnection reconciles commands and execution ownership before accepting new work.
+- Delivery and event ingestion use retryable, at-least-once semantics. Uncertain tool effects are not blindly repeated.
+- Offline machines are shown as unreachable. Active work is not automatically migrated or redispatched.
+- Cancellation remains requested until confirmed. Revocation blocks future platform access; it cannot guarantee immediate termination on an offline machine.
+- A daemon crash may interrupt its child agent. Recovery reconciles native state and marks uncertain work for review instead of silently restarting it.
 
-长期希望实现：用户主要管理目标、优先级、依赖和验收，Agent 按可观察、可干预、有限制的策略持续推进工作。
+## Development environment: two containers
 
-## 验证原则
+The initial build uses exactly two application-environment containers:
 
-- 模型与接口：测试关联、权限、输入校验和状态转换。
-- 调度与执行：测试重复启动、重复投递、取消竞争、超时、进程异常和迟到事件。
-- 事件与前端：测试顺序、增量补读、页面刷新、追加指令和产物访问。
-- 策略：测试依赖环、前置任务失败、并行汇总、最大轮数与预算耗尽。
-- 每个里程碑用固定示例任务验收；模拟执行器用于测试，真实后端用于验证端到端能力。
+| Container       | Contents                                                                                                                                 | Persistent state                                                 |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `platform`      | AgentMatrix built from this checkout, frontend/API, and required database, cache, queue, and storage services under a process supervisor | Platform database and uploaded artifacts                         |
+| `local-machine` | TypeScript daemon, pinned Pi, local tools, and a fixture Git repository                                                                  | Machine identity, native sessions, local journal, and repository |
 
-## 开发与上游说明
+The existing [AIO image](./deployments/aio/community/README.md) still requires external infrastructure and uses prebuilt service images. The two-container harness requires a development-specific platform image built from the current source, with supporting services bundled inside it.
 
-分支协作约定：
+Only the platform publishes a browser-accessible port. The machine initiates connections over the test network and has no published listener. Each container has independent volumes; they communicate through the daemon API, with no shared repository volume or database access from the machine.
 
-- `dev`：主要开发与集成分支，后续开发任务直接在此推进，或通过任务分支合并到此。
-- `main`：后续稳定发布分支，经过验证的阶段性成果由 `dev` 合入。
+The harness must support independent restarts and disconnection tests. Deterministic protocol tests use a simulated adapter; an end-to-end smoke test uses real Pi and locally supplied provider credentials. Credentials are supplied at runtime and excluded from images and committed files. Automated tests run from the host or inside these containers rather than adding a third runtime service.
 
-当前技术栈包括 React / TypeScript / React Router / Vite、MobX、Django / DRF、Celery、PostgreSQL、Redis / Valkey、RabbitMQ、Hocuspocus / Yjs 和对象存储。
+This packaging is for development and integration tests. Production platform services may be deployed separately, and the daemon remains independently installable on real machines without Docker.
 
-常用命令：
+## Initial build roadmap
+
+The detailed milestone checklist and definition of done are in the [initial build issue brief](./docs/initial-build-issue.md).
+
+All Agent milestones below are planned. The initial build is the complete M0–M5 workflow, delivered through independently testable increments.
+
+| Milestone                        | Deliverable                                                                                                       | Acceptance                                                                                                                                 |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| M0: Protocol and harness         | Versioned command/event contracts, a fixed fixture task, and the two-container environment                        | Current source boots; the simulated machine reaches the platform through its outbound API path                                             |
+| M1: Machine connection           | Pairing, scoped credentials, revocation, heartbeat, workspace registration, and capability discovery              | The owner sees an online machine and approved workspace; expired pairing and unauthorized requests are rejected                            |
+| M2: Local Pi execution           | Session/Run/command models, daemon supervisor, Pi adapter, and local command journal                              | An Issue instruction executes through real Pi in the machine container and produces a persistent native session and result                 |
+| M3: Conversation experience      | Machine selector, Issue conversation panel, tool timeline, artifacts, follow-up, cancellation, and card summaries | Users complete multiple turns in the same native session; refresh preserves history; cancellation is visibly acknowledged                  |
+| M4: Recovery and correctness     | Event replay, deduplication, restart reconciliation, stale-event protection, and offline states                   | Duplicate deliveries do not launch duplicate work; network loss preserves history; uncertain execution is never automatically redispatched |
+| M5: Release the initial workflow | Independent daemon packaging, configuration/help, repeatable smoke tests, and setup/troubleshooting documentation | A documented install/pair/run/reconnect flow works with Pi; both containers retain their own state across restarts                         |
+
+Completion requires a fixed task that changes a fixture repository and produces a reviewable artifact, followed by a second instruction in the same session. The platform must display its messages and tool activity and preserve the conversation through browser refresh and connection interruption.
+
+### Initial scope
+
+One owner, one selected machine per session, one registered workspace, one Pi adapter, one primary session per Issue, and one active Run per session. Users explicitly start work and accept results.
+
+Multi-agent strategies, other adapters, automatic machine selection, cross-machine migration, terminal-session attachment, and automatic execution on card drag are later work. No daemon or harness startup commands are advertised as available until implemented.
+
+## Expected code boundaries
+
+These are proposed additions, not existing modules:
+
+| Location                                                             | Responsibility                                                                                                           |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `apps/daemon/`                                                       | Installable TypeScript CLI/service, pairing, polling, process supervision, local persistence, and synchronization        |
+| `packages/agent-protocol/`                                           | Versioned command/event schemas, validation, fixtures, and conformance examples; Python validates the same wire contract |
+| `packages/agent-adapters/`                                           | Local adapter interface and Pi subprocess implementation                                                                 |
+| `apps/api/plane/db/models/agent.py` and migrations                   | Machine, workspace binding, Session, Run, command, event, and artifact models                                            |
+| `apps/api/plane/agent/`                                              | Platform command ownership, ingestion, reconciliation, and authorization services                                        |
+| `apps/api/plane/app/views/agent/`, serializers, and URL registration | User and machine API endpoints with separate authentication                                                              |
+| `packages/types/src/agent/` and `packages/services/src/agent/`       | Platform types and browser API clients                                                                                   |
+| `apps/web/store/agent/` and `apps/web/components/agent/`             | Machines UI, conversation state, timeline, and execution controls                                                        |
+| Existing Issue detail, peek, and Kanban components                   | Conversation entry points and execution summaries                                                                        |
+| `deployments/development/` and a dedicated Compose file              | Two-container source-built environment, fixtures, health checks, and integration scenarios                               |
+
+Keep adapters and process control on the machine. Reuse existing Issue, permissions, and UI foundations; agent records extend them through associations.
+
+## Validation
+
+The initial build must exercise:
+
+- Pairing expiration/reuse, machine revocation, owner/workspace isolation, and registered-path validation.
+- Command redelivery, concurrent starts, cancellation races, unexpected agent exits, and uncertain execution outcomes.
+- Duplicate and out-of-order events, replay after acknowledgement loss, stale events, and large tool output.
+- Native-session continuation, completed-message reconstruction, browser refresh, and independent container restarts.
+- Network interruption while an agent continues locally, followed by complete synchronization without redispatch.
+- A real Pi task that changes the fixture repository and a follow-up that uses its persistent conversation.
+
+Adding a package includes its relevant tests and checks. No tests may require committed credentials or confuse a simulated adapter with proof of real Pi integration.
+
+## Future direction
+
+| Direction                      | Outcome                                                                     |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| More local adapters            | Codex, Claude Code, and other agents behind capability-aware adapters       |
+| Shared machines and routing    | Explicit team grants, capacity limits, and eligible-machine selection       |
+| Strategy templates             | Plan, implement, review, and revise with budgets and stopping conditions    |
+| Issue dependency orchestration | Serial and bounded parallel execution with result aggregation               |
+| Branches and worktrees         | Independent local workspaces, patches, commits, PRs, and CI-linked review   |
+| Session branching              | Compare alternative approaches while preserving native history              |
+| Local tools and knowledge      | MCP, project documents, and business integrations configured on the machine |
+| Faster delivery                | Optional outbound WebSocket connections and browser SSE                     |
+| Quality and cost visibility    | Compare validated outcomes, rework, latency, and supported usage metrics    |
+
+The long-term goal is to manage goals and acceptance on the board while connected machines carry out observable, interruptible work.
+
+## Development and upstream
+
+Development happens on `dev`, directly or through task branches merged into it. Validated milestones later merge into the stable `main` branch.
+
+The existing platform uses React, TypeScript, React Router, Vite, MobX, Django/DRF, PostgreSQL, Celery, Redis/Valkey, RabbitMQ, Hocuspocus/Yjs, and object storage. The daemon is planned as a separate Node.js/TypeScript application.
+
+Existing repository commands:
 
 ```bash
 pnpm dev
@@ -202,8 +262,8 @@ pnpm check:types
 pnpm check:lint
 ```
 
-开发规范参见 [AGENTS.md](./AGENTS.md)。环境初始化脚本为 [setup.sh](./setup.sh)，本地服务配置见 [docker-compose-local.yml](./docker-compose-local.yml)；初始化会写入环境文件，已有配置应先保留。Node 与 pnpm 要求以根目录 [package.json](./package.json) 为准。
+See [AGENTS.md](./AGENTS.md) for development conventions and [package.json](./package.json) for Node and pnpm requirements. Existing initialization uses [setup.sh](./setup.sh), which writes environment files; preserve existing configuration first. [docker-compose-local.yml](./docker-compose-local.yml) describes the current platform environment, not the planned two-container harness.
 
-后端测试方式参见 [测试运行说明](./apps/api/tests/RUNNING_TESTS.md) 和 [测试指南](./apps/api/plane/tests/TESTING_GUIDE.md)。新增执行服务后的部署步骤将在相应里程碑中补充，当前命令不会启动尚未实现的 Agent 工作流程。
+Backend verification guidance: [Running tests](./apps/api/tests/RUNNING_TESTS.md) and [Testing guide](./apps/api/plane/tests/TESTING_GUIDE.md).
 
-本项目基于 [Plane](https://github.com/makeplane/plane) 演进，保留上游版权与来源说明，沿用 AGPL-3.0 许可证，详见 [LICENSE.txt](./LICENSE.txt)。完整的原版项目介绍见 [README.plane.md](./README.plane.md)。
+AgentMatrix builds on [Plane](https://github.com/makeplane/plane), retains upstream attribution, and uses AGPL-3.0; see [LICENSE.txt](./LICENSE.txt). Pi is a separately licensed upstream dependency. The original project introduction remains in [README.plane.md](./README.plane.md).
