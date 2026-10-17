@@ -177,7 +177,7 @@ This packaging is for development and integration tests. Production platform ser
 
 ## Initial build roadmap
 
-The detailed milestone checklist and definition of done are in the [initial build issue brief](./docs/initial-build-issue.md).
+Track implementation in [GitHub issue #1](https://github.com/CaesarYangs/AgentMatrix/issues/1). The initial milestone checklist and definition of done are also preserved in the [build brief](./docs/initial-build-issue.md).
 
 All Agent milestones below are planned. The initial build is the complete M0–M5 workflow, delivered through independently testable increments.
 

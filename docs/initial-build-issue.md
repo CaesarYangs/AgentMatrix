@@ -1,8 +1,8 @@
 # Initial local daemon Pi build
 
-> Issue draft: GitHub Issues are currently disabled for this repository. Enable Issues in repository settings before publishing this tracker.
+> Tracking issue: [#1](https://github.com/CaesarYangs/AgentMatrix/issues/1). Use the live issue to track progress; this file preserves the initial scope and acceptance criteria.
 
-**Proposed issue title:** [feature]: Build local-daemon Pi workflow with persistent Issue conversations
+**Issue title:** [feature]: Build local-daemon Pi workflow with persistent Issue conversations
 
 ## Summary
 
